@@ -15,9 +15,16 @@ Per market, a random walk in logit space, centred on the checkpoint price:
 * sigma is the population standard deviation of the market's own one-minute
   logit-price changes over its last 240 minutes (fewer than 10 changes, e.g.
   a market that only just started trading, falls back to a default of 0.04).
-  It is floored at 0.005 and capped at 0.03 logit units per sqrt-minute, so a
-  market that has sat still for hours still gets a sane spread, and one
-  wild jump cannot blow the spread up without bound.
+  Before taking the standard deviation, the changes are winsorized at the
+  99th percentile of their absolute values in the window: prices move in
+  steps with occasional jumps, and a single jump (the Iran market once fell
+  from 0.49 to 0.275 in one minute) would otherwise set the spread for the
+  next four hours even though the market is otherwise quiet.  Winsorizing
+  keeps the estimate tied to the market's typical minute-to-minute noise
+  while still letting a market that jumps often keep a wide spread, since
+  its 99th percentile is itself large.  Sigma is then floored at 0.005 and
+  capped at 0.03 logit units per sqrt-minute, so a market that has sat still
+  for hours still gets a sane spread.
 * For minute h = 1..240 after the checkpoint, the tau-quantile is
   sigmoid(lx + z_tau * sigma * sqrt(h)), clamped to [0, 1] and rounded to
   6 decimals, where z_tau is the standard-normal quantile at tau.
@@ -65,7 +72,13 @@ def sigmoid(u):
 
 
 def estimate_sigma(prices):
-    """Per-market 1-minute volatility in logit space, from recent history."""
+    """Per-market 1-minute volatility in logit space, from recent history.
+
+    The 1-minute logit changes over the last 240 minutes are winsorized at
+    the 99th percentile of their absolute values before the standard
+    deviation is taken, so one jump does not set the spread for the next
+    four hours (see the module docstring).
+    """
     n = len(prices)
     if n < 2:
         return DEFAULT_SIGMA
@@ -74,6 +87,9 @@ def estimate_sigma(prices):
              for i in range(start, n - 1)]
     if len(diffs) < MIN_DIFFS:
         return DEFAULT_SIGMA
+    abs_diffs = sorted(abs(d) for d in diffs)
+    cap = abs_diffs[int(0.99 * (len(abs_diffs) - 1))]
+    diffs = [max(-cap, min(cap, d)) for d in diffs]
     sigma = statistics.pstdev(diffs)
     return min(SIGMA_CAP, max(SIGMA_FLOOR, sigma))
 
